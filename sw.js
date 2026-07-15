@@ -1,76 +1,110 @@
-// CACHE_NAME: Ini adalah nama "laci penyimpanan" di memori browser Anda. 
-// Jika Anda mengubah kodenya ke depan, Anda tinggal menaikkan versinya 
-// (misal jadi v3) agar browser tahu ada pembaruan.
+// sw.js
 
-const CACHE_NAME = 'bjr-inventory-v2';
+// =========================================================================
+// 1. IMPORT UTILITY DATABASE & ANTREAN
+// =========================================================================
+// Pastikan path relatif ini benar mengarah ke lokasi file js kamu dari posisi sw.js
+importScripts('assets/js/db.js');
+importScripts('assets/js/sync-queue.js');
 
-// assetsToCache: Ini adalah daftar file statis (CSS, JavaScript Chart, Alpine.js, dan Icon) yang wajib disimpan permanen. 
-// File-file ini jarang berubah, jadi sangat aman disimpan di HP pengguna agar saat 
-// membuka aplikasi, tampilannya langsung termuat instan tanpa perlu download ulang.
-const assetsToCache = [
-  '/buanajayarentama/assets/css/output.css?v=1',
-  '/buanajayarentama/assets/css/tabler-icons/dist/tabler-icons.min.css?v=1',
-  '/buanajayarentama/assets/js/chart.min.js?v=1',
-  '/buanajayarentama/assets/js/alpine.min.js?v=1',
+const CACHE_NAME = 'buana-jaya-cache-v2';
+
+// Daftar aset statis utama yang di-cache agar aplikasi bisa terbuka saat offline
+const ASSETS_TO_CACHE = [
+    './',
+    './index.php',
+    './assets/js/db.js',
+    './assets/js/sync-queue.js',
+    // Tambahkan file CSS, JS, atau ikon inti PWA kamu yang lain di bawah ini:
 ];
 
-// Tahap Pemasangan Aplikasi
-self.addEventListener('install', event => {
-  event.waitUntil(
-    caches.open(CACHE_NAME).then(cache => {
-      return cache.addAll(assetsToCache);
-    })
-  );
-});
-
-// Kode ini akan memeriksa semua laci cache lama yang tersimpan di HP user. Jika nama laci tersebut 
-// tidak sama dengan CACHE_NAME yang aktif saat ini (bjr-inventory-v2), maka laci lama (seperti v1) 
-// akan dihapus total untuk menghemat ruang penyimpanan HP.
-self.addEventListener('activate', event => {
-  event.waitUntil(
-    caches.keys().then(cacheNames => {
-      return Promise.all(
-        cacheNames.map(cache => {
-          if (cache !== CACHE_NAME) {
-            return caches.delete(cache);
-          }
-        })
-      );
-    })
-  );
-});
-
-// Strategi Cache: dipisah berdasarkan jenis file
-self.addEventListener('fetch', event => {
-  const url = new URL(event.request.url);
-
-
-  // Khusus Halaman PHP ➔ Network First (Utamakan Internet)
-  // Karena file PHP (seperti halaman monitoring stok gudang Anda sebelumnya) 
-  // berisi data dinamis yang terus berubah di database, kodenya menggunakan strategi Network First:
-  if (url.pathname.endsWith('.php')) {
-    event.respondWith(
-      fetch(event.request)
-        .then(response => {
-          // Simpan salinan terbaru ke cache untuk fallback offline nanti
-          const responseClone = response.clone();
-          caches.open(CACHE_NAME).then(cache => {
-            cache.put(event.request, responseClone);
-          });
-          return response;
-        })
-        .catch(() => {
-          // Kalau offline/gagal fetch, baru pakai cache sebagai fallback
-          return caches.match(event.request);
-        })
+// =========================================================================
+// 2. LIFECYCLE SERVICE WORKER (INSTALL & ACTIVATE)
+// =========================================================================
+self.addEventListener('install', (event) => {
+    console.log('[Service Worker] Installing New Version...');
+    event.waitUntil(
+        caches.open(CACHE_NAME).then((cache) => {
+            return cache.addAll(ASSETS_TO_CACHE);
+        }).then(() => self.skipWaiting()) // Memaksa SW baru langsung aktif
     );
-    return;
-  }
+});
 
-  // Strategi B: Khusus File Statis ➔ Cache First (Utamakan Memori Lokal)
-  event.respondWith(
-    caches.match(event.request).then(cachedResponse => {
-      return cachedResponse || fetch(event.request);
-    })
-  );
+self.addEventListener('activate', (event) => {
+    console.log('[Service Worker] Activating & Clearing Old Caches...');
+    event.waitUntil(
+        caches.keys().then((cacheNames) => {
+            return Promise.all(
+                cacheNames.map((cache) => {
+                    if (cache !== CACHE_NAME) {
+                        console.log('[Service Worker] Deleting old cache:', cache);
+                        return caches.delete(cache);
+                    }
+                })
+            );
+        }).then(() => self.clients.claim()) // Langsung ambil kendali atas seluruh tab halaman aktif
+    );
+});
+
+// =========================================================================
+// 3. STRATEGI FETCH (NETWORK FIRST UNTUK PHP, CACHE FIRST UNTUK STATIC ASSETS)
+// =========================================================================
+self.addEventListener('fetch', (event) => {
+    const url = new URL(event.request.url);
+
+    // Abaikan request POST (seperti form submission atau sync endpoint) dari strategi caching
+    if (event.request.method !== 'GET') {
+        return;
+    }
+
+    // Strategi A: Network First untuk file dinamis (.php) atau halaman utama
+    if (url.pathname.endsWith('.php') || url.pathname === '/') {
+        event.respondWith(
+            fetch(event.request)
+                .then((response) => {
+                    // Clone respons untuk disimpan di cache
+                    const responseClone = response.clone();
+                    caches.open(CACHE_NAME).then((cache) => {
+                        cache.put(event.request, responseClone);
+                    });
+                    return response;
+                })
+                .catch(() => {
+                    // Jika network gagal/offline, ambil dari cache lokal
+                    return caches.match(event.request);
+                })
+        );
+    } 
+    // Strategi B: Cache First untuk file statis (CSS, JS, Images, Fonts)
+    else {
+        event.respondWith(
+            caches.match(event.request).then((cachedResponse) => {
+                if (cachedResponse) {
+                    return cachedResponse;
+                }
+                return fetch(event.request).then((response) => {
+                    const responseClone = response.clone();
+                    caches.open(CACHE_NAME).then((cache) => {
+                        cache.put(event.request, responseClone);
+                    });
+                    return response;
+                });
+            })
+        );
+    }
+});
+
+// =========================================================================
+// 4. FITUR BACKGROUND SYNC (SINKRONISASI LATAR BELAKANG)
+// =========================================================================
+self.addEventListener('sync', (event) => {
+    // Memeriksa kesesuaian tag sync yang dikirim dari form create-maintenance
+    if (event.tag === 'sync-maintenance') {
+        console.log('[Service Worker] Menangkap event sync-maintenance. Memulai sinkronisasi otomatis...');
+        
+        // event.waitUntil menjaga agar Service Worker tetap hidup sampai proses fungsi selesai
+        event.waitUntil(
+            syncMaintenanceQueue() // Fungsi dari assets/js/sync-queue.js
+        );
+    }
 });

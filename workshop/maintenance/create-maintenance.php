@@ -312,4 +312,124 @@ include '../../layouts/navbar.php';
 
 </main>
 
+<!-- Load database lokal browser -->
+<script src="../../assets/js/db.js"></script>
+
+<script>
+document.addEventListener('DOMContentLoaded', () => {
+    // 1. Cari elemen form di halaman
+    const form = document.querySelector('form[action="store-maintenance.php"]');
+    if (!form) return;
+
+    form.addEventListener('submit', async (e) => {
+        // Hentikan submit bawaan HTML agar halaman tidak reload
+        e.preventDefault();
+
+        // 2. Ambil data input teks utama
+        const typeUnit = form.querySelector('[name="type_unit"]')?.value;
+        const nopol = form.querySelector('[name="nopol"]')?.value;
+        const mekanik = form.querySelector('[name="mekanik"]')?.value;
+
+        // 3. Ambil data array sparepart langsung dari elemen input DOM HTML
+        let items = [];
+        
+        // Cari semua input hidden sparepart_id yang ada di form
+        const sparepartInputs = form.querySelectorAll('input[name^="items["][name$="[sparepart_id]"]');
+        
+        sparepartInputs.forEach((input) => {
+            const sparepartId = input.value;
+            
+            // Ekstrak index array dari atribut name (misal: items[0][sparepart_id] -> 0)
+            const nameAttr = input.getAttribute('name');
+            const match = nameAttr.match(/items\[(\d+)\]/);
+            
+            if (match && sparepartId !== '') {
+                const index = match[1];
+                // Cari input quantity pasangannya berdasarkan index yang sama
+                const qtyInput = form.querySelector(`input[name="items[${index}][quantity]"]`);
+                const quantity = qtyInput ? parseInt(qtyInput.value) : 1;
+                
+                items.push({
+                    sparepart_id: parseInt(sparepartId),
+                    quantity: quantity || 1
+                });
+            }
+        });
+
+        // Validasi ketersediaan item sparepart terpilih
+        if (items.length === 0) {
+            alert('Mohon pilih minimal 1 sparepart yang valid.');
+            return;
+        }
+
+        // 4. Bungkus menjadi payload final beserta UUID & Timestamp
+        const maintenanceUuid = crypto.randomUUID();
+        const currentDate = new Date().toISOString().slice(0, 19).replace('T', ' ');
+
+        const payload = {
+            uuid: maintenanceUuid,
+            type_unit: typeUnit,
+            nopol: nopol,
+            mekanik: mekanik,
+            items: items,
+            created_at: currentDate
+        };
+
+        // 5. Cek Koneksi Internet Browser
+        if (navigator.onLine) {
+            try {
+                // Kirim langsung ke endpoint sync yang baru (Step 2)
+                const response = await fetch('store-maintenance-sync.php', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify(payload)
+                });
+
+                const result = await response.json();
+
+                if (response.ok && result.success) {
+                    alert('Data maintenance berhasil disimpan langsung ke server!');
+                    window.location.href = '../maintenance.php'; 
+                } else {
+                    // Kasus error dari server (seperti stok tidak cukup)
+                    alert('Gagal menyimpan: ' + (result.message || 'Terjadi kesalahan pada server.'));
+                }
+            } catch (error) {
+                // Sinyal tiba-tiba drop saat request berjalan
+                console.warn('Koneksi tidak stabil, mengalihkan ke IndexedDB:', error);
+                await handleOfflineSave(payload);
+            }
+        } else {
+            // Mutlak Offline
+            await handleOfflineSave(payload);
+        }
+    });
+
+    // Fungsi pembantu untuk menyimpan data ke IndexedDB (db.js)
+    async function handleOfflineSave(payload) {
+        try {
+            // Panggil fungsi saveToQueue yang ada di db.js
+            await saveToQueue(payload);
+            
+            // Daftarkan ke Background Sync Service Worker jika didukung
+            if ('serviceWorker' in navigator && 'SyncManager' in window) {
+                const registration = await navigator.serviceWorker.ready;
+                await registration.sync.register('sync-maintenance');
+                console.log('Background Sync "sync-maintenance" berhasil didaftarkan.');
+            }
+            
+            alert('Koneksi internet terputus! Data maintenance telah disimpan di database lokal browser dan akan otomatis disinkronkan saat sinyal kembali pulih.');
+            
+            // Redirect ke halaman utama maintenance
+            window.location.href = '../maintenance.php';
+        } catch (idbError) {
+            console.error('IndexedDB Error:', idbError);
+            alert('Gagal menyimpan data ke penyimpanan lokal browser.');
+        }
+    }
+});
+</script>
+
 <?php include '../../layouts/footer.php'; ?>
