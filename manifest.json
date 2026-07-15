@@ -1,0 +1,25 @@
+
+{
+  "name": "Buana Jaya Rentama Inventory",
+  "short_name": "BJR Inventory",
+  "description": "Aplikasi Manajemen Inventaris Sparepart BJR",
+  "start_url": "/buanajayarentama/index.php",
+  "display": "standalone",
+  "background_color": "#0f172a",
+  "theme_color": "#1e40af",
+  "orientation": "portrait-primary",
+  "icons": [
+    {
+      "src": "/buanajayarentama/assets/img/logo192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/buanajayarentama/assets/img/logo512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    }
+  ]
+}
