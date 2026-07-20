@@ -14,9 +14,9 @@ include '../layouts/navbar.php';
 
 $userId = $_SESSION['user_id'];
 
-// ===== Ambil SEMUA pengiriman milik user ini, semua status =====
+// ===== Ambil SEMUA pengiriman milik user ini, semua status + tanggal susulan =====
 $sql = "
-    SELECT sj.id, sj.nomor_surat, sj.tanggal_kirim, sj.status
+    SELECT sj.id, sj.nomor_surat, sj.tanggal_kirim, sj.tanggal_susulan, sj.status
     FROM surat_jalan sj
     WHERE sj.user_id = ?
     ORDER BY sj.created_at DESC
@@ -35,20 +35,23 @@ while ($data = mysqli_fetch_assoc($result)) {
         'id'            => $data['id'],
         'nomor_surat'   => $data['nomor_surat'],
         'tanggal_kirim' => $data['tanggal_kirim'],
+        'tanggal_susulan' => $data['tanggal_susulan'],
         'status'        => $data['status'],
         'items'         => [],
     ];
     $pengirimanIds[] = $data['id'];
 }
 
-// ===== Ambil semua detail item untuk surat-surat di atas =====
+// ===== Ambil semua detail item untuk surat-surat di atas (Menambahkan sjd.pernah_kurang) =====
+$detailIds = [];
+
 if (!empty($pengirimanIds)) {
 
     $placeholders = implode(',', array_fill(0, count($pengirimanIds), '?'));
     $types        = str_repeat('i', count($pengirimanIds));
 
     $detailSql = "
-        SELECT sjd.id, sjd.surat_jalan_id, sjd.quantity, sjd.quantity_diterima,
+        SELECT sjd.id, sjd.surat_jalan_id, sjd.quantity, sjd.quantity_diterima, sjd.pernah_kurang,
                s.kode_sparepart, s.nama_sparepart, s.number_part, s.type_unit,
                k.kode_komponen
         FROM surat_jalan_detail sjd
@@ -84,16 +87,56 @@ if (!empty($pengirimanIds)) {
             'nama'              => $namaLengkap,
             'quantity'          => $detail['quantity'],
             'quantity_diterima' => $detail['quantity_diterima'],
+            'pernah_kurang'     => $detail['pernah_kurang'],
+            'logs'              => [],
         ];
+
+        $detailIds[] = $detail['id'];
     }
 }
+
+// ===== Ambil riwayat susulan per item (tabel surat_jalan_detail_log) =====
+// Sesuaikan nama tabel `users` dan kolom `name` di bawah kalau struktur tabel user kamu berbeda.
+$logsByDetail = [];
+
+if (!empty($detailIds)) {
+
+    $logPlaceholders = implode(',', array_fill(0, count($detailIds), '?'));
+    $logTypes        = str_repeat('i', count($detailIds));
+
+    $logSql = "
+        SELECT l.surat_jalan_detail_id, l.qty_susulan, l.diterima_sebelum, l.diterima_sesudah,
+               l.created_at, u.nama AS nama_konfirmasi
+        FROM surat_jalan_detail_log l
+        LEFT JOIN users u ON u.id = l.dikonfirmasi_oleh
+        WHERE l.surat_jalan_detail_id IN ($logPlaceholders)
+        ORDER BY l.created_at DESC
+    ";
+
+    $logStmt = mysqli_prepare($conn, $logSql);
+    mysqli_stmt_bind_param($logStmt, $logTypes, ...$detailIds);
+    mysqli_stmt_execute($logStmt);
+    $logResult = mysqli_stmt_get_result($logStmt);
+
+    while ($log = mysqli_fetch_assoc($logResult)) {
+        $logsByDetail[$log['surat_jalan_detail_id']][] = $log;
+    }
+}
+
+// Tempelkan riwayat ke masing-masing item
+foreach ($pengirimanList as &$pengirimanRef) {
+    foreach ($pengirimanRef['items'] as &$itemRef) {
+        $itemRef['logs'] = $logsByDetail[$itemRef['detail_id']] ?? [];
+    }
+    unset($itemRef);
+}
+unset($pengirimanRef);
 
 if (!empty($_SESSION['form_success'])): $formSuccess = $_SESSION['form_success']; unset($_SESSION['form_success']); endif;
 if (!empty($_SESSION['form_error'])): $formError = $_SESSION['form_error']; unset($_SESSION['form_error']); endif;
 
 /**
  * Mapping status transaksi -> label, warna badge, dan style aksen kartu.
- * Sesuaikan value status di sini kalau nama status di database berbeda.
  */
 function statusBadgeInfo(string $status): array
 {
@@ -226,11 +269,20 @@ foreach ($pengirimanList as $p) {
                                 <?= renderBadge($badge['label'], $badge['color']) ?>
                             </div>
 
-                            <div class="flex items-center gap-4 text-xs text-slate-500">
+                            <div class="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-slate-500">
                                 <span class="flex items-center gap-1.5">
                                     <i class="ti ti-calendar text-sm"></i>
                                     <?= $pengiriman['tanggal_kirim'] ? date('d M Y', strtotime($pengiriman['tanggal_kirim'])) : '-' ?>
                                 </span>
+
+                                <!-- INFO TANGGAL PENGIRIMAN SUSULAN WORKSHOP -->
+                                <?php if (!empty($pengiriman['tanggal_susulan'])): ?>
+                                <span class="flex items-center gap-1.5 text-blue-600 bg-blue-50 px-2 py-0.5 rounded-md font-medium">
+                                    <i class="ti ti-calendar-plus text-sm"></i>
+                                    Susulan: <?= date('d M Y', strtotime($pengiriman['tanggal_susulan'])) ?>
+                                </span>
+                                <?php endif; ?>
+
                                 <span class="flex items-center gap-1.5">
                                     <i class="ti ti-box text-sm"></i>
                                     <?= count($pengiriman['items']) ?> item
@@ -254,7 +306,7 @@ foreach ($pengirimanList as $p) {
                                 <?= $isPending ? 'Konfirmasi Jumlah Diterima' : 'Lihat Detail Item' ?>
                             </span>
                             <i class="ti ti-chevron-down text-base transition-transform duration-200 text-slate-400"
-                                :class="expanded['<?= $pengiriman['id'] ?>'] ? 'rotate-180' : ''"></i>
+                               :class="expanded['<?= $pengiriman['id'] ?>'] ? 'rotate-180' : ''"></i>
                         </button>
 
                         <!-- Detail items, collapsible -->
@@ -266,23 +318,58 @@ foreach ($pengirimanList as $p) {
 
                             <?php if ($isPending): ?>
                             <p class="text-xs text-slate-400 pt-3 pb-1 leading-relaxed">
-                                Ubah angka pada kolom "Diterima" jika ada barang susulan baru yang masuk, atau sesuaikan total riil barang yang telah diterima.
+                                Kolom <strong>"Diterima"</strong> menampilkan jumlah yang sudah tercatat sebelumnya dan tidak bisa diubah.
+                                Isi kolom <strong>"Susulan"</strong> dengan jumlah barang <em>yang benar-benar diterima secara fisik saat ini</em> — sistem akan menambahkannya ke total secara otomatis.
                             </p>
                             <?php endif; ?>
 
                             <div class="divide-y divide-slate-50">
                                 <?php foreach ($pengiriman['items'] as $item):
-                                    $valueDefaultInput = $item['quantity_diterima'] !== null ? (int)$item['quantity_diterima'] : (int)$item['quantity'];
-                                    $itemShort = !$isPending && $item['quantity_diterima'] !== null && (int)$item['quantity_diterima'] < (int)$item['quantity'];
+                                    // Jumlah yang sudah tercatat diterima sebelumnya (riwayat, tidak bisa diubah)
+                                    $oldDiterima = $item['quantity_diterima'] !== null ? (int)$item['quantity_diterima'] : 0;
+                                    // Sisa yang belum diterima, jadi batas atas untuk input Susulan
+                                    $sisaQty     = max((int)$item['quantity'] - $oldDiterima, 0);
+
+                                    // Deteksi riwayat status dari database flag pernah_kurang
+                                    $pernahKurang = isset($item['pernah_kurang']) && (int)$item['pernah_kurang'] === 1;
+                                    $isCompleteSekarang = ($item['quantity_diterima'] !== null && (int)$item['quantity_diterima'] === (int)$item['quantity']);
+
+                                    // Style visual bawaan untuk text kuning jika item sedang/pernah kurang
+                                    $itemShort = $pernahKurang && !$isCompleteSekarang;
                                 ?>
                                 <div class="flex items-center justify-between gap-3 py-3">
                                     <div class="min-w-0 flex-1">
-                                        <p class="text-sm text-slate-700 font-medium truncate">
-                                            <?= htmlspecialchars($item['nama']) ?>
+                                        <p class="text-sm text-slate-700 font-medium truncate flex items-center gap-1.5">
+                                            <span><?= htmlspecialchars($item['nama']) ?></span>
+                                            <!-- Penanda ikon riwayat kecil tanpa mengubah base layout -->
+                                            <?php if ($pernahKurang && $isCompleteSekarang): ?>
+                                                <i class="ti ti-history text-green-600 text-xs" title="Pernah dicicil (Sudah Lengkap)"></i>
+                                            <?php elseif ($pernahKurang): ?>
+                                                <i class="ti ti-history text-amber-500 text-xs" title="Sedang dicicil (Belum Lengkap)"></i>
+                                            <?php endif; ?>
                                         </p>
                                         <p class="text-xs text-slate-400 font-mono mt-0.5">
                                             <?= htmlspecialchars($item['kode']) ?>
+                                            <?php if ($pernahKurang && $isCompleteSekarang): ?>
+                                                <span class="text-[10px] text-green-600 font-sans ml-1 font-semibold">(Susulan Lengkap)</span>
+                                            <?php endif; ?>
                                         </p>
+
+                                        <!-- Riwayat per-susulan (dari surat_jalan_detail_log) -->
+                                        <?php if (!empty($item['logs'])): ?>
+                                        <div class="mt-2 pl-2.5 border-l-2 border-slate-100 space-y-1">
+                                            <?php foreach ($item['logs'] as $log): ?>
+                                            <p class="text-[11px] text-slate-400 leading-snug">
+                                                <span class="text-slate-600 font-medium">+<?= (int)$log['qty_susulan'] ?> pcs</span>
+                                                &middot; <?= date('d M Y', strtotime($log['created_at'])) ?>
+                                                &middot; <?= (int)$log['diterima_sebelum'] ?> &rarr; <?= (int)$log['diterima_sesudah'] ?>
+                                                <?php if (!empty($log['nama_konfirmasi'])): ?>
+                                                &middot; oleh <?= htmlspecialchars($log['nama_konfirmasi']) ?>
+                                                <?php endif; ?>
+                                            </p>
+                                            <?php endforeach; ?>
+                                        </div>
+                                        <?php endif; ?>
                                     </div>
 
                                     <?php if ($isPending): ?>
@@ -300,15 +387,35 @@ foreach ($pengirimanList as $p) {
 
                                         <i class="ti ti-arrow-right text-slate-300 text-sm mt-4"></i>
 
-                                        <!-- Quantity diterima -->
+                                        <!-- Quantity diterima (riwayat, fixed/readonly) -->
                                         <div class="flex flex-col items-center gap-1">
                                             <label class="text-[10px] text-slate-400 uppercase tracking-wide">Diterima</label>
                                             <input
                                                 type="number"
-                                                name="qty_diterima[<?= $item['detail_id'] ?>]"
-                                                value="<?= $valueDefaultInput ?>"
+                                                value="<?= $oldDiterima ?>"
+                                                disabled
+                                                class="w-16 px-2 py-1.5 text-sm text-center rounded-lg border border-slate-200 bg-slate-100 text-slate-500 cursor-not-allowed">
+                                            <input type="hidden" name="diterima_lama[<?= $item['detail_id'] ?>]" value="<?= $oldDiterima ?>">
+                                        </div>
+
+                                        <i class="ti ti-plus text-slate-300 text-sm mt-4"></i>
+
+                                        <!--
+                                            FIX: Field "Susulan" tadinya value="<?= $sisaQty ?>" -> otomatis
+                                            ke-isi penuh sisa quantity walaupun ini pengiriman PERTAMA dan
+                                            user belum konfirmasi apa-apa secara fisik. Sekarang dikosongkan
+                                            (tidak ada atribut value) supaya user WAJIB mengetik sendiri
+                                            jumlah yang benar-benar diterima. placeholder dipakai sekadar
+                                            sebagai petunjuk visual batas maksimal, bukan nilai terisi.
+                                        -->
+                                        <div class="flex flex-col items-center gap-1">
+                                            <label class="text-[10px] text-slate-400 uppercase tracking-wide">Susulan</label>
+                                            <input
+                                                type="number"
+                                                name="qty_susulan[<?= $item['detail_id'] ?>]"
+                                                placeholder="0-<?= $sisaQty ?>"
                                                 min="0"
-                                                max="<?= $item['quantity'] ?>"
+                                                max="<?= $sisaQty ?>"
                                                 required
                                                 class="w-16 px-2 py-1.5 text-sm text-center rounded-lg border border-slate-200 bg-white text-slate-800 font-medium focus:outline-none focus:ring-2 focus:ring-blue-500/30 focus:border-blue-400 transition">
                                         </div>
@@ -368,7 +475,7 @@ foreach ($pengirimanList as $p) {
 
                         <p class="text-sm text-slate-500 text-center mb-6 leading-relaxed">
                             Konfirmasi pengiriman <strong class="text-slate-700"><?= htmlspecialchars($pengiriman['nomor_surat']) ?></strong>?
-                            Pastikan jumlah diterima sudah sesuai kondisi fisik barang terbaru. Stok akan bertambah secara akumulatif di workshop kamu berdasarkan selisih barang susulan yang baru masuk.
+                            Jumlah pada kolom "Susulan" akan ditambahkan ke total barang yang sudah diterima sebelumnya di workshop kamu.
                         </p>
 
                         <div class="flex gap-3">

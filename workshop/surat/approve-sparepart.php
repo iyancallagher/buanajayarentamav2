@@ -12,7 +12,7 @@ if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
 
 $userId  = $_SESSION['user_id'];
 $suratId = $_POST['surat_id'] ?? null;
-$qtyDiterimaInput = $_POST['qty_diterima'] ?? []; // Array [detail_id => value] dari form
+$qtySusulanInput = $_POST['qty_susulan'] ?? []; // Array [detail_id => value] dari form, hanya tambahan barunya
 
 if (empty($suratId)) {
     $_SESSION['form_error'] = 'Surat jalan tidak ditemukan.';
@@ -47,9 +47,9 @@ try {
         throw new Exception('Surat jalan ini sudah diterima sebelumnya atau belum dikirim kembali oleh gudang.');
     }
 
-    // ===== Ambil semua item di surat ini beserta kolom quantity_diterima versi lama =====
+    // ===== Ambil semua item di surat ini beserta kolom kuantitas dan flag riwayat =====
     $detailSql = "
-        SELECT sjd.id AS detail_id, sjd.sparepart_id, sjd.quantity, sjd.quantity_diterima, s.nama_sparepart
+        SELECT sjd.id AS detail_id, sjd.sparepart_id, sjd.quantity, sjd.quantity_diterima, sjd.pernah_kurang, s.nama_sparepart
         FROM surat_jalan_detail sjd
         JOIN sparepart s ON s.id = sjd.sparepart_id
         WHERE sjd.surat_jalan_id = ? FOR UPDATE
@@ -73,35 +73,34 @@ try {
     $matchingItems = 0;
 
     foreach ($items as $detailId => $item) {
-        // Ambil nilai qty baru yang diinput user. Jika kosong atau tidak terkirim, default ke 0
-        $qtyTerimaBaru = isset($qtyDiterimaInput[$detailId]) ? (int)$qtyDiterimaInput[$detailId] : 0;
-        $qtyKirim      = (int)$item['quantity'];
-        
-        // Ambil riwayat kuantitas lama yang sudah terlanjur dikonfirmasi pada gelombang sebelumnya
+        $qtyKirim = (int)$item['quantity'];
+
+        // Riwayat kuantitas lama yang sudah terlanjur dikonfirmasi pada gelombang sebelumnya (sumber kebenaran dari DB, bukan dari form)
         $qtyTerimaLama = $item['quantity_diterima'] !== null ? (int)$item['quantity_diterima'] : 0;
+        $sisaMaks      = $qtyKirim - $qtyTerimaLama;
 
-        // Proteksi batas input kuantitas
-        if ($qtyTerimaBaru < 0 || $qtyTerimaBaru > $qtyKirim) {
-            throw new Exception('Jumlah diterima untuk ' . $item['nama_sparepart'] . ' tidak valid.');
+        // Ambil qty susulan (tambahan baru) yang diinput user. Jika kosong atau tidak terkirim, default ke 0
+        $qtySusulan = isset($qtySusulanInput[$detailId]) ? (int)$qtySusulanInput[$detailId] : 0;
+
+        // Proteksi batas input kuantitas: tidak boleh negatif dan tidak boleh melebihi sisa yang belum diterima
+        if ($qtySusulan < 0 || $qtySusulan > $sisaMaks) {
+            throw new Exception('Jumlah susulan untuk ' . $item['nama_sparepart'] . ' tidak valid.');
         }
 
-        // HITUNG TAMBAHAN FISIK BARANG DARI GELOMBANG SUSULAN
-        // Contoh: Input Akumulasi Baru (10) - Riwayat Lama (8) = +2 pcs tambahan stok riil
-        $tambahanStokReal = $qtyTerimaBaru - $qtyTerimaLama;
+        $qtyTerimaBaru = $qtyTerimaLama + $qtySusulan;
 
-        // Jika user sengaja menurunkan angka inputan di bawah riwayat lama, cegah agar stok workshop tidak rusak
-        if ($tambahanStokReal < 0) {
-            throw new Exception('Kuantitas penerimaan baru ' . $item['nama_sparepart'] . ' tidak boleh lebih kecil dari jumlah penerimaan sebelumnya (' . $qtyTerimaLama . ' Pcs).');
-        }
+        // --- PENENTUAN FLAG RIWAYAT BARANG KURANG ---
+        // Jika total sekarang masih kurang dari yang dikirim, atau sebelumnya data database memang sudah bertanda pernah_kurang = 1
+        $setFlagPernahKurang = ($qtyTerimaBaru < $qtyKirim || (int)$item['pernah_kurang'] === 1) ? 1 : 0;
 
-        // 1. Update kolom quantity_diterima di surat_jalan_detail menggunakan angka total akumulasi terbaru
+        // 1. Update kolom quantity_diterima dan pernah_kurang di surat_jalan_detail menggunakan total terbaru
         $updateDetail = mysqli_prepare($conn, "
             UPDATE surat_jalan_detail 
-            SET quantity_diterima = ? 
+            SET quantity_diterima = ?, pernah_kurang = ? 
             WHERE id = ? AND surat_jalan_id = ?
         ");
-        mysqli_stmt_bind_param($updateDetail, 'iii', $qtyTerimaBaru, $detailId, $suratId);
-        
+        mysqli_stmt_bind_param($updateDetail, 'iiii', $qtyTerimaBaru, $setFlagPernahKurang, $detailId, $suratId);
+
         if (!mysqli_stmt_execute($updateDetail)) {
             throw new Exception('Gagal memperbarui kuantiti detail untuk ' . $item['nama_sparepart']);
         }
@@ -111,14 +110,15 @@ try {
             $matchingItems++;
         }
 
-        // HANYA jika ada penambahan barang susulan baru (> 0), proses stok dijalankan
-        if ($tambahanStokReal > 0) {
-            // 2. Catat riwayat log masuk HANYA sebesar selisih tambahannya saja
+        // HANYA jika ada penambahan barang susulan baru (> 0), proses stok & log dijalankan
+        if ($qtySusulan > 0) {
+
+            // 2. Catat riwayat log masuk HANYA sebesar qty susulan
             $insertMasuk = mysqli_prepare($conn, "
                 INSERT INTO sparepart_masuk_wk (user_id, sparepart_id, quantity)
                 VALUES (?, ?, ?)
             ");
-            mysqli_stmt_bind_param($insertMasuk, 'iii', $userId, $item['sparepart_id'], $tambahanStokReal);
+            mysqli_stmt_bind_param($insertMasuk, 'iii', $userId, $item['sparepart_id'], $qtySusulan);
 
             if (!mysqli_stmt_execute($insertMasuk)) {
                 throw new Exception('Gagal mencatat riwayat sparepart masuk untuk ' . $item['nama_sparepart']);
@@ -134,13 +134,13 @@ try {
             $stokData = mysqli_fetch_assoc(mysqli_stmt_get_result($checkStok));
 
             if ($stokData) {
-                // Update master stok workshop dengan menambahkan nilai selisih barang susulannya saja
+                // Update master stok workshop dengan menambahkan nilai qty susulan
                 $updateStok = mysqli_prepare($conn, "
                     UPDATE stok_sparepart_wk
                     SET stok = stok + ?
                     WHERE user_id = ? AND sparepart_id = ?
                 ");
-                mysqli_stmt_bind_param($updateStok, 'iii', $tambahanStokReal, $userId, $item['sparepart_id']);
+                mysqli_stmt_bind_param($updateStok, 'iii', $qtySusulan, $userId, $item['sparepart_id']);
 
                 if (!mysqli_stmt_execute($updateStok)) {
                     throw new Exception('Gagal memperbarui stok untuk ' . $item['nama_sparepart']);
@@ -151,19 +151,30 @@ try {
                     INSERT INTO stok_sparepart_wk (user_id, sparepart_id, stok)
                     VALUES (?, ?, ?)
                 ");
-                mysqli_stmt_bind_param($insertStok, 'iii', $userId, $item['sparepart_id'], $tambahanStokReal);
+                mysqli_stmt_bind_param($insertStok, 'iii', $userId, $item['sparepart_id'], $qtySusulan);
 
                 if (!mysqli_stmt_execute($insertStok)) {
                     throw new Exception('Gagal membuat data stok baru untuk ' . $item['nama_sparepart']);
                 }
             }
+
+            // 4. Catat riwayat per-susulan ke surat_jalan_detail_log
+            $insertLog = mysqli_prepare($conn, "
+                INSERT INTO surat_jalan_detail_log (surat_jalan_detail_id, qty_susulan, diterima_sebelum, diterima_sesudah, dikonfirmasi_oleh)
+                VALUES (?, ?, ?, ?, ?)
+            ");
+            mysqli_stmt_bind_param($insertLog, 'iiiii', $detailId, $qtySusulan, $qtyTerimaLama, $qtyTerimaBaru, $userId);
+
+            if (!mysqli_stmt_execute($insertLog)) {
+                throw new Exception('Gagal mencatat riwayat susulan untuk ' . $item['nama_sparepart']);
+            }
         }
     }
 
-    // 4. Tentukan status berdasarkan pembaruan data real-time
+    // 5. Tentukan status berdasarkan pembaruan data real-time
     $statusBaru = ($matchingItems === $totalItems) ? 'diterima' : 'diterima_sebagian';
 
-    // 5. Update status surat + perbarui tanggal_terima ke tanggal konfirmasi terbaru
+    // 6. Update status surat + perbarui tanggal_terima ke tanggal konfirmasi terbaru
     $updateSurat = mysqli_prepare($conn, "
         UPDATE surat_jalan
         SET status = ?, tanggal_terima = CURDATE()

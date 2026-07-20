@@ -1,90 +1,83 @@
 // assets/js/sync-queue.js
 
-// Fungsi utama untuk menyinkronkan seluruh antrean data dari IndexedDB ke MySQL
-async function doSyncMaintenance() {
-    // Pastikan fungsi ini bisa membaca database (getAllFromQueue, deleteFromQueue, markAsConflict harus sudah ada dari db.js)
-    if (typeof getAllFromQueue !== 'function') {
-        console.error('db.js belum di-load. Tidak dapat memproses sinkronisasi.');
-        return;
-    }
-
+// Fungsi utama untuk memproses dan menguras antrean offline
+async function syncMaintenanceQueue() {
+    console.log('Memulai proses sinkronisasi antrean offline...');
+    
     try {
+        // 1. Ambil semua item dari IndexedDB (fungsi dari db.js)
         const queue = await getAllFromQueue();
         
-        // Filter hanya data yang berstatus 'pending' (data 'conflict' tidak di-retry otomatis)
-        const pendingItems = queue.filter(item => item.sync_status === 'pending');
-
-        if (pendingItems.length === 0) {
-            console.log('Tidak ada antrean maintenance yang perlu disinkronkan.');
+        if (queue.length === 0) {
+            console.log('Antrean kosong. Tidak ada data yang perlu disinkronkan.');
             return;
         }
 
-        console.log(`Menemukan ${pendingItems.length} data maintenance offline. Memulai sinkronisasi...`);
+        // Tentukan base path endpoint sync. 
+        // Menggunakan absolute path agar aman dipanggil dari service worker maupun halaman workshop.
+        const targetUrl = '/buanajayarentama/workshop/maintenance/store-maintenance-sync.php';
 
-        for (const item of pendingItems) {
+        // 2. Iterasi setiap data maintenance di dalam antrean
+        for (const item of queue) {
+            // Lewati item yang statusnya conflict (stok habis) agar tidak looping error terus
+            if (item.sync_status === 'conflict') {
+                console.log(`Item UUID ${item.uuid} dilewati karena status konflik stok.`);
+                continue;
+            }
+
             try {
-                // Tembak data JSON ke endpoint sync di backend
-                // Sesuaikan path jika dipanggil dari Service Worker (relative terhadap root/sw.js) 
-                // atau dari halaman biasa (relative terhadap file PHP)
-                const targetUrl = typeof window === 'undefined' 
-                    ? './workshop/maintenance/store-maintenance-sync.php' 
-                    : 'store-maintenance-sync.php';
-
+                // Kirim data ke endpoint sync di server
                 const response = await fetch(targetUrl, {
                     method: 'POST',
                     headers: {
                         'Content-Type': 'application/json'
                     },
-                    body: JSON.stringify(item)
+                    credentials: 'include', // KUNCI UTAMA: Menyertakan session login saat disinkronkan oleh Service Worker
+                    body: JSON.stringify({
+                        uuid: item.uuid,
+                        type_unit: item.type_unit,
+                        nopol: item.nopol,
+                        mekanik: item.mekanik,
+                        items: item.items,
+                        created_at: item.created_at
+                    })
                 });
 
                 const result = await response.json();
 
                 if (response.ok && result.success) {
-                    // Jika sukses ter-insert di MySQL server, hapus item dari IndexedDB
+                    // Skenario A: Sukses tersimpan di server MySQL
+                    console.log(`UUID ${item.uuid} berhasil tersinkronisasi. Menghapus dari lokal...`);
                     await deleteFromQueue(item.uuid);
-                    console.log(`Data maintenance dengan UUID ${item.uuid} berhasil disinkronkan dan dihapus dari antrean lokal.`);
-                } else if (response.status === 409 && result.stock_conflict) {
-                    // Kasus bentrok stok fatal (stok tidak cukup saat disinkronkan)
-                    // Tandai statusnya sebagai 'conflict' di IndexedDB agar tidak di-retry terus menerus
-                    await markAsConflict(item.uuid, result.message || 'Stok tidak cukup');
-                    console.warn(`Sinkronisasi tertunda untuk UUID ${item.uuid}: ${result.message}`);
+                } else if (response.status === 409 || (result && result.stock_conflict)) {
+                    // Skenario B: Bentrok Stok (Gagal validasi server)
+                    console.warn(`UUID ${item.uuid} gagal sync: Stok Tidak Cukup. Menandai konflik.`);
+                    await markAsConflict(item.uuid, result.message || 'Stok tidak mencukupi saat sinkronisasi.');
+                } else if (response.status === 401) {
+                    // Skenario C: Sesi login habis
+                    console.error('Sinkronisasi terhenti: Sesi pengguna telah berakhir (401).');
+                    break; 
                 } else {
-                    // Kegagalan respons server lainnya (misal error 500)
-                    console.error(`Gagal menyinkronkan UUID ${item.uuid}:`, result.message);
+                    // Gagal validasi lain atau server error
+                    console.error(`UUID ${item.uuid} gagal diproses server:`, result.message);
                 }
             } catch (fetchError) {
-                // Jika jaringan tiba-tiba putus lagi di tengah jalan, hentikan loop
-                // Biarkan sisa antrean diproses pada kesempatan online berikutnya
-                console.error('Koneksi terputus saat proses sinkronisasi antrean:', fetchError);
-                break;
+                // Sinyal drop kembali di tengah jalan saat proses looping sync
+                console.error(`Gagal mengirim UUID ${item.uuid} karena gangguan jaringan:`, fetchError);
+                break; // Hentikan loop, coba lagi di event sinkronisasi berikutnya
             }
         }
+        
+        console.log('Proses sinkronisasi antrean selesai dijalankan.');
     } catch (error) {
-        console.error('Terjadi kesalahan pada IndexedDB saat melakukan sinkronisasi:', error);
+        console.error('Terjadi kesalahan sistem pada antrean IndexedDB:', error);
     }
 }
 
-// =========================================================================
-// Mendaftarkan Trigger Sinkronisasi (Hanya berjalan jika dipanggil di sisi client/window)
-// =========================================================================
+// Mengaktifkan pemicu sinkronisasi manual saat browser mendeteksi status 'online'
 if (typeof window !== 'undefined') {
-    // 1. Mendaftarkan melalui Background Sync API jika Service Worker aktif
-    if ('serviceWorker' in navigator && 'SyncManager' in window) {
-        navigator.serviceWorker.ready.then(async (registration) => {
-            try {
-                // Daftarkan tag sync bernama 'sync-maintenance'
-                await registration.sync.register('sync-maintenance');
-                console.log('Background Sync "sync-maintenance" berhasil didaftarkan.');
-            } catch (err) {
-                console.warn('Gagal mendaftarkan Background Sync, beralih ke fallback event online:', err);
-            }
-        });
-    }
-
-    // 2. Fallback Event Listener: Picu sinkronisasi manual saat browser mendeteksi perubahan sinyal ke 'online'
     window.addEventListener('online', () => {
-        console.log('Sinyal kembali online! Memicu sinkronisasi antrean secara manual.');
-        doSyncMaintenance();
+        console.log('Browser mendeteksi koneksi internet kembali. Memicu sync...');
+        syncMaintenanceQueue();
     });
 }

@@ -16,9 +16,18 @@ if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
 
 // 4. TANGKAP PARAMETER UTAMA
 $surat_id = (int)($_POST['surat_id'] ?? 0);
+// Tangkap tanggal pengiriman susulan dari input form
+$tanggal_susulan = $_POST['tanggal_susulan'] ?? ''; 
 
 if ($surat_id <= 0) {
     $_SESSION['form_error'] = "Parameter surat jalan tidak valid.";
+    header("Location: ../daftar-surat.php");
+    exit;
+}
+
+// Validasi tambahan: Tanggal susulan wajib diisi jika ingin melakukan pengiriman susulan
+if (empty($tanggal_susulan)) {
+    $_SESSION['form_error'] = "Tanggal pengiriman susulan wajib diisi.";
     header("Location: ../daftar-surat.php");
     exit;
 }
@@ -38,19 +47,24 @@ try {
         throw new Exception("Surat jalan tidak ditemukan.");
     }
 
-    // Eksekusi pembaruan status header surat jalan menjadi 'dikirim' kembali
-    // Menghapus isi kolom 'tanggal_terima' agar form konfirmasi di workshop aktif lagi
-    // Data kuantitas dikirim & diterima tidak disentuh/dihapus sama sekali
-    $querySurat = "UPDATE surat_jalan SET status = 'dikirim', tanggal_terima = NULL WHERE id = ?";
+    // MODIFIKASI QUERY:
+    // Selain mengubah status menjadi 'dikirim' dan mereset 'tanggal_terima' menjadi NULL,
+    // kita juga menyimpan tanggal pengiriman susulan ke dalam kolom 'tanggal_susulan'
+    $querySurat = "UPDATE surat_jalan SET status = 'dikirim', tanggal_terima = NULL, tanggal_susulan = ? WHERE id = ?";
     $stmtSurat  = mysqli_prepare($conn, $querySurat);
-    mysqli_stmt_bind_param($stmtSurat, "i", $surat_id);
+    
+    // Bind parameter tanggal (s) dan id (i)
+    mysqli_stmt_bind_param($stmtSurat, "si", $tanggal_susulan, $surat_id);
     
     if (!mysqli_stmt_execute($stmtSurat)) {
         throw new Exception("Gagal memperbarui status dokumen ke database.");
     }
 
     mysqli_commit($conn);
-    $_SESSION['form_success'] = "Status surat jalan \"{$surat['nomor_surat']}\" berhasil diubah menjadi [Dikirim] kembali untuk pengiriman susulan.";
+    
+    // Ubah format tanggal ke format Indonesia agar info alert lebih rapi (d M Y)
+    $tanggal_tampil = date('d M Y', strtotime($tanggal_susulan));
+    $_SESSION['form_success'] = "Status surat jalan \"{$surat['nomor_surat']}\" berhasil diubah menjadi [Dikirim] kembali untuk pengiriman susulan pada tanggal {$tanggal_tampil}.";
 
 } catch (Exception $e) {
     mysqli_rollback($conn);

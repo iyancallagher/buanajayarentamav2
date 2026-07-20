@@ -120,7 +120,7 @@ include '../../layouts/navbar.php';
 
                 <div class="flex items-center gap-3 pt-2">
                     <button type="submit" class="inline-flex items-center gap-2 px-6 py-3 rounded-xl bg-gradient-to-r from-blue-600 to-indigo-600 text-white font-semibold shadow-lg shadow-blue-500/25 hover:shadow-blue-500/40 hover:-translate-y-0.5 transition-all duration-200"
-                            onclick="return confirm('Apakah Anda yakin barang susulan siap dikirim dan ingin membuka akses input verifikasi di workshop?')">
+                            onclick="return confirm('Apakah Anda yakin barang susulan siap dikirim pada tanggal tersebut dan ingin membuka akses input verifikasi di workshop?')">
                         <i class="ti ti-truck-delivery text-base"></i> Konfirmasi Kirim Susulan
                     </button>
                     <a href="../daftar-surat.php" class="inline-flex items-center gap-2 px-6 py-3 rounded-xl border border-slate-200 text-slate-600 font-semibold hover:bg-slate-50 transition-all duration-200">
@@ -133,7 +133,7 @@ include '../../layouts/navbar.php';
             <div class="space-y-4">
                 <div class="bg-white rounded-2xl border border-slate-200 p-5 shadow-sm">
                     <h3 class="font-bold text-slate-800 text-sm mb-3.5 tracking-wide uppercase">Detail Dokumen</h3>
-                    <div class="space-y-3 text-sm">
+                    <div class="space-y-4 text-sm">
                         <div>
                             <span class="block text-xs font-medium text-slate-400 uppercase tracking-wider">No. Surat Jalan</span>
                             <span class="font-mono text-slate-700 font-bold block mt-0.5"><?= htmlspecialchars($data['nomor_surat']) ?></span>
@@ -146,6 +146,22 @@ include '../../layouts/navbar.php';
                             <span class="block text-xs font-medium text-slate-400 uppercase tracking-wider">Status Manifes Saat Ini</span>
                             <span class="font-semibold block mt-0.5 text-amber-600 uppercase text-xs"><?= htmlspecialchars($data['status']) ?></span>
                         </div>
+                        
+                        <!-- INPUT TANGGAL PENGIRIMAN SUSULAN -->
+                        <div class="pt-2 border-t border-slate-100">
+                            <label class="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-2">
+                                Tanggal Kirim Susulan <span class="text-red-500">*</span>
+                            </label>
+                            <div class="relative">
+                                <i class="ti ti-calendar-plus absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 text-base"></i>
+                                <input
+                                    type="date"
+                                    name="tanggal_susulan"
+                                    required
+                                    class="w-full pl-9 pr-3 py-2 rounded-xl border border-slate-200 bg-slate-50 text-sm transition-all
+                                           focus:outline-none focus:bg-white focus:ring-2 focus:ring-blue-500/20 focus:border-blue-400">
+                            </div>
+                        </div>
                     </div>
                 </div>
 
@@ -155,7 +171,7 @@ include '../../layouts/navbar.php';
                         <div>
                             <h4 class="font-semibold text-blue-700 text-sm mb-1">Mekanisme Susulan</h4>
                             <p class="text-xs text-blue-600 leading-relaxed">
-                                Menekan tombol konfirmasi akan mengubah status surat jalan kembali menjadi <strong>DIKIRIM</strong>. Data kuantitas penerimaan lama milik workshop tetap dipertahankan agar mereka bisa langsung mengupdate total akumulasi penerimaan barunya.
+                                Menekan tombol konfirmasi akan mengubah status surat jalan kembali menjadi <strong>DIKIRIM</strong>. Data kuantitas penerimaan lama milik workshop tetap dipertahaman agar mereka bisa langsung mengupdate total akumulasi penerimaan barunya.
                             </p>
                         </div>
                     </div>

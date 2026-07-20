@@ -189,4 +189,21 @@ if (!empty($searchValue)) {
 
 </main>
 
+<!-- Load database lokal dan manajemen antrean sinkronisasi -->
+<script src="../assets/js/db.js"></script>
+<script src="../assets/js/sync-queue.js"></script>
+
+<script>
+// Pemicu otomatis: Setiap kali halaman maintenance dibuka atau kembali aktif dalam kondisi online,
+// jalankan sinkronisasi untuk data offline yang tersisa.
+document.addEventListener('DOMContentLoaded', () => {
+    if (navigator.onLine) {
+        if (typeof syncMaintenanceQueue === 'function') {
+            console.log("Mendeteksi status online, memproses antrean data lokal...");
+            syncMaintenanceQueue();
+        }
+    }
+});
+</script>
+
 <?php include '../layouts/footer.php'; ?>
